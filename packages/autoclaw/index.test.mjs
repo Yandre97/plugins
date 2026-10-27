@@ -2,7 +2,7 @@
 // answer the upstream gives lands on one of its outcomes, and the plugin
 // factory registers both providers with every hook check.mjs looks for.
 import { expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AutoclawAuthPlugin, AutoclawCnAuthPlugin, _internal } from "./index.mjs"
@@ -893,5 +893,28 @@ test("the shapes AutoClaw's gateway can't read go put right, on both channels (#
     }
   } finally {
     globalThis.fetch = realFetch
+  }
+})
+
+// The spend window rides on local balance deltas (the upstream has no points
+// ledger): a drop is spend, a rise above the peak opens a new cycle, and the
+// Beijing-day accumulators sum what a day saw.
+test("balanceObserve: spend, top-up, and the day's sums", () => {
+  const { balanceObserve, usageStatePath, beijingDayOf } = _internal
+  const K = "test-" + Math.random().toString(36).slice(2)
+  try {
+    // fresh sight: the peak is where tracking starts, nothing spent yet
+    expect(balanceObserve(K, 1000)).toEqual({ peak: 1000, used: 0, daySpent: 0, dayGained: 0 })
+    // a drop is spend against the peak
+    expect(balanceObserve(K, 900)).toEqual({ peak: 1000, used: 100, daySpent: 100, dayGained: 0 })
+    // a rise above the peak opens a new cycle: used resets, the gain adds up
+    expect(balanceObserve(K, 1100)).toEqual({ peak: 1100, used: 0, daySpent: 100, dayGained: 200 })
+    // further drops spend against the new peak
+    expect(balanceObserve(K, 1050)).toEqual({ peak: 1100, used: 50, daySpent: 150, dayGained: 200 })
+    expect(beijingDayOf()).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  } finally {
+    const st = JSON.parse(readFileSync(usageStatePath, "utf8"))
+    delete st.accts[K]
+    writeFileSync(usageStatePath, JSON.stringify(st))
   }
 })

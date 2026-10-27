@@ -18,7 +18,9 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Buffer } from "node:buffer";
 import * as http from "node:http";
 
@@ -420,6 +422,58 @@ function tokenFields(data, fallbackRefresh) {
 // ---------------------------------------------------------------------------
 // 签到与积分
 // ---------------------------------------------------------------------------
+
+// 上游没有积分流水/用量接口（wallets.v2 只有余额，task-list 只有签到），
+// 「已用」只能用本地余额差值算：每次 usage() 观察一次余额，记下本轮峰值，
+// 峰值 − 当前 = 本轮已消耗；余额上涨（签到/兑换/礼包）视为新一轮开始。
+// 按账号（uid）存状态文件，重启不丢；插件更新会重置（无害，只是 used 归零重学）。
+// 北京日界另记当日 −消耗/+入账，用于窗口里的「今日」摘要。
+const usageStatePath = join(dirname(fileURLToPath(import.meta.url)), ".usage-state.json");
+let usageState;
+function usageStateLoad() {
+  if (usageState) return usageState;
+  try {
+    usageState = JSON.parse(readFileSync(usageStatePath, "utf8"));
+    if (!usageState || typeof usageState !== "object" || typeof usageState.accts !== "object") usageState = { accts: {} };
+  } catch {
+    usageState = { accts: {} };
+  }
+  return usageState;
+}
+function usageStateSave() {
+  try {
+    writeFileSync(usageStatePath, JSON.stringify(usageState), { mode: 0o600 });
+  } catch {}
+}
+/** 北京日期（UTC+8）的 YYYY-MM-DD，签到/每日赠送的日界。 */
+function beijingDayOf(d = new Date()) {
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+/**
+ * 记一次余额观察，返回 { peak, used, daySpent, dayGained }。
+ * peak：本轮最高余额；余额 > peak 时开新轮（used 归零）。
+ * daySpent/dayGained：北京当日观察到的 −消耗/+入账 累计。
+ */
+function balanceObserve(key, total) {
+  const st = usageStateLoad();
+  const day = beijingDayOf();
+  const prev = st.accts[key] ?? {};
+  let peak = Number(prev.peak);
+  if (!Number.isFinite(peak) || peak <= 0 || total > peak) peak = total;
+  const used = Math.max(0, peak - total);
+  const sameDay = prev.day === day;
+  let daySpent = sameDay ? Number(prev.daySpent) || 0 : 0;
+  let dayGained = sameDay ? Number(prev.dayGained) || 0 : 0;
+  const last = Number(prev.balance);
+  if (Number.isFinite(last) && last > 0) {
+    const d = total - last;
+    if (d < 0) daySpent += -d;
+    else if (d > 0) dayGained += d;
+  }
+  st.accts[key] = { peak, balance: total, day, daySpent, dayGained, at: new Date().toISOString() };
+  usageStateSave();
+  return { peak, used, daySpent, dayGained };
+}
 
 async function fetchWallets(accessToken, hosts) {
   for (const host of dedupe(hosts)) {
@@ -851,10 +905,29 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
                 used: 0,
                 display: signinFinal.status === "completed"
                   ? `今日已签 ✓${signinFinal.reward ? ` +${signinFinal.reward}` : ""}`
-                  : `今日未签（+${signinFinal.reward || 400}）`,
+                  : `今日未签（+${signinFinal.reward || 200}）`,
                 aside: true,
               }]
             : [];
+
+          // 本轮消耗窗口：上游没有用量/流水接口，用本地余额差值算
+          // （峰值 − 当前；余额上涨即新一轮）。首日只有一次观察时不出这行。
+          const track = balanceObserve(String(auth.uid ?? auth.accountId ?? providerId), total);
+          const windows = [...signinWindow];
+          if (track.used > 0) {
+            const pct = track.peak > 0 ? Math.min(100, Math.round((track.used / track.peak) * 1000) / 10) : 0;
+            windows.unshift({
+              name: "本轮消耗",
+              // used/remaining 是 0–100 的百分比；amount/limit 是原始积分
+              used: pct,
+              remaining: Math.max(0, 100 - pct),
+              amount: Math.round(track.used),
+              limit: Math.round(track.peak),
+              display: `${Math.round(track.used)} / ${Math.round(track.peak)} 积分`
+                + (track.daySpent > 0 ? ` · 今日 -${Math.round(track.daySpent)}` : "")
+                + (track.dayGained > 0 ? ` · +${Math.round(track.dayGained)}` : ""),
+            });
+          }
 
           // 积分是纯余额，没有总量也没有已用量：只放在 balance 里。做成
           // used: 0 的窗口，卡片会给它配上「剩余 100%」（#376）。细分钱包
@@ -862,7 +935,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
           const parts = named.map((w) => `${w.name} ${Math.round(w.balance)}`);
           return {
             balance: `${Math.round(total)} 积分${parts.length ? `（${parts.join(" · ")}）` : ""}`,
-            windows: signinWindow,
+            windows,
           };
         } catch (e) {
           if (e?.banned) return { error: e.message, signIn: "kept", windows: [] };
@@ -1384,6 +1457,7 @@ export const _internal = {
   makePluginForTest: makeAutoclawPlugin,
   platformTm, md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,
+  balanceObserve, usageStatePath, beijingDayOf,
   fetchUserProfile, accountDeviceId, accountDisplayName, startLocalOAuth,
   FLAGGED, unflagged, unflag, tidyBody, rewriteManagedBody, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,

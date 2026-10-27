@@ -35,7 +35,11 @@ OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magp
 
 - 对话走 `POST {host}/autoclaw-proxy/proxy/autoclaw/v1/chat/completions`（`X-Authorization` 鉴权）；
 - token 过期前自动轮换（refresh token 一次一换，`auth.refresh` 钩子交给 magpie 串行化，不会双花）；
-- 积分余额通过 `auth.usage` 的 `balance` 显示（纯积分制，无总量上限，不做成额度窗口，细分钱包写在括号里）；
+- 积分余额通过 `auth.usage` 的 `balance` 显示（纯积分制，无总量上限，细分钱包写在括号里）；
+  上游没有积分流水/用量接口（wallets.v2 只有余额），**已用/剩余% 由本地余额差值算**：
+  每次 `usage()` 记下本轮余额峰值，`峰值 − 当前 = 本轮已消耗`，余额上涨（每日签到、
+  礼包）即新一轮开始；按账号存插件目录 `.usage-state.json`，重启不丢，插件更新会重置
+  （无害，下次查询重学峰值）。因为每天签到都会开新一轮，「本轮」≈「自今天签到以来」。
 - **国际版登录是完整本地实现**：插件在 127.0.0.1 上取官方 TokenServer 端口池中的一个端口
   （18432/19654/19723/53699，OAuth client 回调白名单；被占自动顺延）起临时服务器，内嵌引导页完成
   阿里滑块验证（`AliyunCaptcha` SDK，`ali_captcha_verify_param` 回执）→ 获取授权页 →
