@@ -592,6 +592,8 @@ test("signinOnUsage signs every account, also two with the same name", async () 
     }
     return Response.json({ code: 0, data: { total_balance: 1000, wallets: [] } })
   }
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  _internal.setUsageStatePath(join(dir, ".usage-state.json"))
   try {
     const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } }, { signin: true, signinOnUsage: true })
     const accounts = [
@@ -609,6 +611,7 @@ test("signinOnUsage signs every account, also two with the same name", async () 
     expect(_internal.signinAccountKey("autoclaw", accounts[2])).not.toBe(_internal.signinAccountKey("autoclaw", accounts[3]))
   } finally {
     globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -623,6 +626,8 @@ test("usage: the credit balance and its wallets are the balance, never a window 
     ] } })
     return Response.json({ code: 0, data: null })
   }
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  _internal.setUsageStatePath(join(dir, ".usage-state.json"))
   try {
     const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
     const u = await hooks.auth.usage(async () => ({ type: "oauth", access: "a1" }))
@@ -630,6 +635,7 @@ test("usage: the credit balance and its wallets are the balance, never a window 
     expect(u.windows.filter((w) => w.name !== "每日签到")).toEqual([])
   } finally {
     globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -896,25 +902,105 @@ test("the shapes AutoClaw's gateway can't read go put right, on both channels (#
   }
 })
 
+
+
 // The spend window rides on local balance deltas (the upstream has no points
-// ledger): a drop is spend, a rise above the peak opens a new cycle, and the
-// Beijing-day accumulators sum what a day saw.
+// ledger): a drop is spend, and ANY rise over the last balance opens a new
+// cycle - a check-in often lands after a spend, and waiting to pass the old
+// peak would under-count the cycle. The Beijing-day sums keep the day's view.
 test("balanceObserve: spend, top-up, and the day's sums", () => {
-  const { balanceObserve, usageStatePath, beijingDayOf } = _internal
+  const { balanceObserve, setUsageStatePath, beijingDayOf } = _internal
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  setUsageStatePath(join(dir, ".usage-state.json"))
   const K = "test-" + Math.random().toString(36).slice(2)
   try {
     // fresh sight: the peak is where tracking starts, nothing spent yet
     expect(balanceObserve(K, 1000)).toEqual({ peak: 1000, used: 0, daySpent: 0, dayGained: 0 })
     // a drop is spend against the peak
     expect(balanceObserve(K, 900)).toEqual({ peak: 1000, used: 100, daySpent: 100, dayGained: 0 })
-    // a rise above the peak opens a new cycle: used resets, the gain adds up
+    // a rise opens a new cycle: used resets, the gain adds up
     expect(balanceObserve(K, 1100)).toEqual({ peak: 1100, used: 0, daySpent: 100, dayGained: 200 })
     // further drops spend against the new peak
     expect(balanceObserve(K, 1050)).toEqual({ peak: 1100, used: 50, daySpent: 150, dayGained: 200 })
+    // the review's case: spend 500, then a check-in +200 lands BELOW the old
+    // peak - the cycle still reopens (used 0), and the day keeps the 500
+    const K2 = K + "-2"
+    balanceObserve(K2, 1000)
+    balanceObserve(K2, 500)
+    expect(balanceObserve(K2, 700)).toEqual({ peak: 700, used: 0, daySpent: 500, dayGained: 200 })
     expect(beijingDayOf()).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   } finally {
-    const st = JSON.parse(readFileSync(usageStatePath, "utf8"))
-    delete st.accts[K]
-    writeFileSync(usageStatePath, JSON.stringify(st))
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// The window as the card sees it: nothing on a fresh sight, then the cycle's
+// share with the day's sums; a check-in below the old peak reopens the cycle.
+test("usage: the spend window across two reads, and a check-in that reopens the cycle", async () => {
+  const realFetch = globalThis.fetch
+  let balance = 20000
+  globalThis.fetch = async (input) => {
+    const u = String(input)
+    if (u.includes("wallets")) return Response.json({ code: 0, data: { total_balance: balance, wallets: [] } })
+    if (u.includes("autoclaw-task-list")) {
+      return Response.json({ code: 0, data: [{ task_id: "daily_signin", status: "completed", reward_points: 200 }] })
+    }
+    return Response.json({ code: 0, data: null })
+  }
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  _internal.setUsageStatePath(join(dir, ".usage-state.json"))
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const auth = { type: "oauth", access: "a1", refresh: "r1", uid: "spend-1" }
+    // fresh sight: the peak is set, no window yet
+    const first = await hooks.auth.usage(async () => auth)
+    expect(first.windows.find((w) => w.name === "本轮消耗")).toBeUndefined()
+    // the pool drains 3123: the window carries the share and the day's spend
+    balance = 16877
+    const second = await hooks.auth.usage(async () => auth)
+    const w = second.windows.find((x) => x.name === "本轮消耗")
+    expect(w.used).toBe(15.6)
+    expect(w.remaining).toBe(84.4)
+    expect(w.amount).toBe(3123)
+    expect(w.limit).toBe(20000)
+    expect(w.display).toBe("3123 / 20000 积分 · 今日 -3123")
+    // a check-in +200 lands below the old peak and still reopens the cycle
+    balance = 17077
+    const third = await hooks.auth.usage(async () => auth)
+    expect(third.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
+  } finally {
+    globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Two accounts can carry the same display name (#254), so the ledger key is
+// signinAccountKey - uid, or the refresh token when an old account has none -
+// never the name: B's first sight must not read as spend against A's peak.
+test("usage: two same-name accounts keep separate ledgers", async () => {
+  const realFetch = globalThis.fetch
+  const balances = { a1: 1000, a2: 300 }
+  globalThis.fetch = async (input, init) => {
+    const u = String(input)
+    if (u.includes("wallets")) {
+      const who = new Headers(init?.headers).get("Authorization")
+      return Response.json({ code: 0, data: { total_balance: balances[who.slice(-2)], wallets: [] } })
+    }
+    return Response.json({ code: 0, data: [] })
+  }
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  _internal.setUsageStatePath(join(dir, ".usage-state.json"))
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const a = { type: "oauth", access: "a1", refresh: "r1", accountId: "AutoClaw用户", uid: "n1" }
+    const b = { type: "oauth", access: "a2", refresh: "r2", accountId: "AutoClaw用户", uid: "n2" }
+    await hooks.auth.usage(async () => a)
+    // B is a fresh sight of its own, not A's ledger: no window, not "used 700"
+    const u = await hooks.auth.usage(async () => b)
+    expect(u.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
+    expect(u.balance).toBe("300 积分")
+  } finally {
+    globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
   }
 })

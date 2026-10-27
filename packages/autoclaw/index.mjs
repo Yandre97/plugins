@@ -428,8 +428,13 @@ function tokenFields(data, fallbackRefresh) {
 // 峰值 − 当前 = 本轮已消耗；余额上涨（签到/兑换/礼包）视为新一轮开始。
 // 按账号（uid）存状态文件，重启不丢；插件更新会重置（无害，只是 used 归零重学）。
 // 北京日界另记当日 −消耗/+入账，用于窗口里的「今日」摘要。
-const usageStatePath = join(dirname(fileURLToPath(import.meta.url)), ".usage-state.json");
+let usageStatePath = join(dirname(fileURLToPath(import.meta.url)), ".usage-state.json");
 let usageState;
+/** 测试注入：指向临时目录，并丢掉内存缓存，测试之间互不沿用。 */
+function setUsageStatePath(p) {
+  usageStatePath = p;
+  usageState = undefined;
+}
 function usageStateLoad() {
   if (usageState) return usageState;
   try {
@@ -451,25 +456,29 @@ function beijingDayOf(d = new Date()) {
 }
 /**
  * 记一次余额观察，返回 { peak, used, daySpent, dayGained }。
- * peak：本轮最高余额；余额 > peak 时开新轮（used 归零）。
+ * 任何上涨（签到/礼包/兑换，total > 上次余额）都开新一轮：峰值即当前，used 归零——
+ * 不等涨过旧峰值，签到 +200 常在花费之后到，按旧峰值会把这一轮少算成「峰值 − 当前」。
  * daySpent/dayGained：北京当日观察到的 −消耗/+入账 累计。
  */
 function balanceObserve(key, total) {
   const st = usageStateLoad();
   const day = beijingDayOf();
   const prev = st.accts[key] ?? {};
-  let peak = Number(prev.peak);
-  if (!Number.isFinite(peak) || peak <= 0 || total > peak) peak = total;
-  const used = Math.max(0, peak - total);
+  const last = Number(prev.balance);
   const sameDay = prev.day === day;
   let daySpent = sameDay ? Number(prev.daySpent) || 0 : 0;
   let dayGained = sameDay ? Number(prev.dayGained) || 0 : 0;
-  const last = Number(prev.balance);
-  if (Number.isFinite(last) && last > 0) {
-    const d = total - last;
-    if (d < 0) daySpent += -d;
-    else if (d > 0) dayGained += d;
+  let peak;
+  if (Number.isFinite(last) && last > 0 && total > last) {
+    // 上涨：开新一轮（README 承诺的「余额上涨即新一轮开始」）
+    dayGained += total - last;
+    peak = total;
+  } else {
+    peak = Number(prev.peak);
+    if (!Number.isFinite(peak) || peak <= 0 || total > peak) peak = total;
+    if (Number.isFinite(last) && last > 0 && total < last) daySpent += last - total;
   }
+  const used = Math.max(0, peak - total);
   st.accts[key] = { peak, balance: total, day, daySpent, dayGained, at: new Date().toISOString() };
   usageStateSave();
   return { peak, used, daySpent, dayGained };
@@ -905,14 +914,16 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
                 used: 0,
                 display: signinFinal.status === "completed"
                   ? `今日已签 ✓${signinFinal.reward ? ` +${signinFinal.reward}` : ""}`
-                  : `今日未签（+${signinFinal.reward || 200}）`,
+                  : `今日未签（+${signinFinal.reward || 400}）`,
                 aside: true,
               }]
             : [];
 
           // 本轮消耗窗口：上游没有用量/流水接口，用本地余额差值算
           // （峰值 − 当前；余额上涨即新一轮）。首日只有一次观察时不出这行。
-          const track = balanceObserve(String(auth.uid ?? auth.accountId ?? providerId), total);
+          // 键复用 signinAccountKey（#254）：显示名可以重复，没 uid 的旧账号按
+          // refresh token 哈希，同名的两个账号不能共用一本账。
+          const track = balanceObserve(signinAccountKey(providerId, auth), total);
           const windows = [...signinWindow];
           if (track.used > 0) {
             const pct = track.peak > 0 ? Math.min(100, Math.round((track.used / track.peak) * 1000) / 10) : 0;
@@ -1457,7 +1468,7 @@ export const _internal = {
   makePluginForTest: makeAutoclawPlugin,
   platformTm, md5Hex, jwtClaim, tokenFields, codeValue, bizHeaders, bareToken, newDeviceId,
   dailySignin, signinStatus, maybeSignin, signinAccountKey, signinConfig, checkinOutcome, refreshTokens,
-  balanceObserve, usageStatePath, beijingDayOf,
+  balanceObserve, usageStatePath, setUsageStatePath, beijingDayOf,
   fetchUserProfile, accountDeviceId, accountDisplayName, startLocalOAuth,
   FLAGGED, unflagged, unflag, tidyBody, rewriteManagedBody, autoclawRewriteBody, explained, OFFICIAL_SYSTEM_PROMPT, REFUSED_HINT,
   guidePageHtml, callbackPageHtml,
