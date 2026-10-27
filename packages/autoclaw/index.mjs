@@ -914,7 +914,7 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
                 used: 0,
                 display: signinFinal.status === "completed"
                   ? `今日已签 ✓${signinFinal.reward ? ` +${signinFinal.reward}` : ""}`
-                  : `今日未签（+${signinFinal.reward || 400}）`,
+                  : `今日未签（+${signinFinal.reward || 200}）`,
                 aside: true,
               }]
             : [];
