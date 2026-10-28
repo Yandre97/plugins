@@ -1006,6 +1006,8 @@ test("usage: the spend window across two reads, and a check-in that reopens the 
     const second = await hooks.auth.usage(async () => auth)
     expect(second.windows.find((w) => w.name === "积分余额")?.balance).toBe(16877)
     const w = second.windows.find((x) => x.name === "本轮消耗")
+    // display only: the share is spend since the last rise, not what is left
+    expect(w.aside).toBe(true)
     expect(w.used).toBe(15.6)
     expect(w.remaining).toBe(84.4)
     expect(w.amount).toBe(3123)
