@@ -632,7 +632,11 @@ test("usage: the credit balance and its wallets are the balance, never a window 
     const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
     const u = await hooks.auth.usage(async () => ({ type: "oauth", access: "a1" }))
     expect(u.balance).toBe("1234 积分（赠送积分 500 · 会员积分 734）")
-    expect(u.windows.filter((w) => w.name !== "每日签到")).toEqual([])
+    // the prepaid wallet reading (magpie #3950): the balance as told, in its
+    // unit, and no share invented - a first read has no spend window yet
+    expect(u.windows.filter((w) => w.name !== "每日签到")).toEqual([
+      { name: "积分余额", balance: 1234.4, unit: "积分" },
+    ])
   } finally {
     globalThis.fetch = realFetch
     rmSync(dir, { recursive: true, force: true })
@@ -958,12 +962,14 @@ test("usage: the spend window across two reads, and a check-in that reopens the 
   try {
     const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
     const auth = { type: "oauth", access: "a1", refresh: "r1", uid: "spend-1" }
-    // fresh sight: the peak is set, no window yet
+    // fresh sight: the peak is set, no spend window yet, the wallet as told
     const first = await hooks.auth.usage(async () => auth)
     expect(first.windows.find((w) => w.name === "本轮消耗")).toBeUndefined()
+    expect(first.windows.find((w) => w.name === "积分余额")).toEqual({ name: "积分余额", balance: 20000, unit: "积分" })
     // the pool drains 3123: the window carries the share and the day's spend
     balance = 16877
     const second = await hooks.auth.usage(async () => auth)
+    expect(second.windows.find((w) => w.name === "积分余额")?.balance).toBe(16877)
     const w = second.windows.find((x) => x.name === "本轮消耗")
     expect(w.used).toBe(15.6)
     expect(w.remaining).toBe(84.4)
@@ -1007,6 +1013,7 @@ test("usage: two same-name accounts keep separate ledgers", async () => {
     // B is a fresh sight of its own, not A's ledger: no window, not "used 700"
     const u = await hooks.auth.usage(async () => b)
     expect(u.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
+    expect(u.windows.find((x) => x.name === "积分余额")?.balance).toBe(300)
     expect(u.balance).toBe("300 积分")
   } finally {
     globalThis.fetch = realFetch
@@ -1039,6 +1046,7 @@ test("usage: an unreadable total_balance is unknown, not a drained pool", async 
     expect(good.error).toBeUndefined()
     expect(good.balance).toBe("990 积分")
     expect(good.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
+    expect(good.windows.find((x) => x.name === "积分余额")?.balance).toBe(990)
   } finally {
     globalThis.fetch = realFetch
     rmSync(dir, { recursive: true, force: true })

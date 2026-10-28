@@ -950,15 +950,16 @@ function makeAutoclawPlugin({ providerId, providerName, homeHost, loginMethod })
           // 键复用 signinAccountKey（#254）：显示名可以重复，没 uid 的旧账号按
           // refresh token 哈希，同名的两个账号不能共用一本账。
           const track = balanceObserve(signinAccountKey(providerId, auth), total);
-          const windows = [...signinWindow];
+          // 预付余额窗口（magpie ≥ v0.1.1790，#3950）：balance 是「还剩多少」的
+          // 一等读数，路由按它认识账号、不发明百分比——池子大的排前、花光的
+          // 垫底；旧宿主不认识这个字段，账号维持原状（未知），无副作用。
+          const windows = [...signinWindow, { name: "积分余额", balance: total, unit: "积分" }];
           if (track.used > 0) {
             const pct = track.peak > 0 ? Math.min(100, Math.round((track.used / track.peak) * 1000) / 10) : 0;
             windows.unshift({
               name: "本轮消耗",
               // aside：只展示，不参与路由。这个百分比是「自上次上涨以来花掉的比例」，
-              // 不是「池子还剩多少」——刚签到的账号是 0%，一个余额 18000/峰值 20000
-              // 的账号才 10%，拿它排位会把快空的账号排到前面。等 magpie 给插件用量
-              // 接口加上一等的预付余额字段后，直接上报余额更合适。
+              // 不是「池子还剩多少」——路由的池子比较交给上面的 balance 窗口。
               aside: true,
               // used/remaining 是 0–100 的百分比；amount/limit 是原始积分
               used: pct,
