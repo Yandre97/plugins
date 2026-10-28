@@ -923,11 +923,17 @@ test("balanceObserve: spend, top-up, and the day's sums", () => {
     // further drops spend against the new peak
     expect(balanceObserve(K, 1050)).toEqual({ peak: 1100, used: 50, daySpent: 150, dayGained: 200 })
     // the review's case: spend 500, then a check-in +200 lands BELOW the old
-    // peak - the cycle still reopens (used 0), and the day keeps the 500
+    // peak — the cycle still reopens (used 0), and the day keeps the 500
     const K2 = K + "-2"
     balanceObserve(K2, 1000)
     balanceObserve(K2, 500)
     expect(balanceObserve(K2, 700)).toEqual({ peak: 700, used: 0, daySpent: 500, dayGained: 200 })
+    // a drained pool is the most common cycle: 0 is a real reading, not
+    // "never seen" — the check-in that follows reopens the cycle from zero
+    const K3 = K + "-3"
+    balanceObserve(K3, 1000)
+    balanceObserve(K3, 0)
+    expect(balanceObserve(K3, 200)).toEqual({ peak: 200, used: 0, daySpent: 1000, dayGained: 200 })
     expect(beijingDayOf()).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -976,7 +982,10 @@ test("usage: the spend window across two reads, and a check-in that reopens the 
 
 // Two accounts can carry the same display name (#254), so the ledger key is
 // signinAccountKey - uid, or the refresh token when an old account has none -
-// never the name: B's first sight must not read as spend against A's peak.
+// never the name. Both accounts here have NO uid on purpose: the pre-review
+// key (uid ?? accountId ?? provider) fell back to the shared display name and
+// read B's first sight as spend against A's peak; only the token-hash key
+// keeps them apart.
 test("usage: two same-name accounts keep separate ledgers", async () => {
   const realFetch = globalThis.fetch
   const balances = { a1: 1000, a2: 300 }
@@ -992,13 +1001,44 @@ test("usage: two same-name accounts keep separate ledgers", async () => {
   _internal.setUsageStatePath(join(dir, ".usage-state.json"))
   try {
     const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
-    const a = { type: "oauth", access: "a1", refresh: "r1", accountId: "AutoClaw用户", uid: "n1" }
-    const b = { type: "oauth", access: "a2", refresh: "r2", accountId: "AutoClaw用户", uid: "n2" }
+    const a = { type: "oauth", access: "a1", refresh: "r1", accountId: "AutoClaw用户" }
+    const b = { type: "oauth", access: "a2", refresh: "r2", accountId: "AutoClaw用户" }
     await hooks.auth.usage(async () => a)
     // B is a fresh sight of its own, not A's ledger: no window, not "used 700"
     const u = await hooks.auth.usage(async () => b)
     expect(u.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
     expect(u.balance).toBe("300 积分")
+  } finally {
+    globalThis.fetch = realFetch
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// An unreadable total_balance (null / "" / not a number) is "unknown", never
+// a drained pool: Number(null) is 0, which would record the whole cycle as
+// spent and let routing shelve the account. The next good read starts clean.
+test("usage: an unreadable total_balance is unknown, not a drained pool", async () => {
+  const realFetch = globalThis.fetch
+  let balance = null
+  globalThis.fetch = async (input) => {
+    const u = String(input)
+    if (u.includes("wallets")) return Response.json({ code: 0, data: { total_balance: balance, wallets: [] } })
+    return Response.json({ code: 0, data: [] })
+  }
+  const dir = mkdtempSync(join(tmpdir(), "autoclaw-usage-"))
+  _internal.setUsageStatePath(join(dir, ".usage-state.json"))
+  try {
+    const hooks = await AutoclawAuthPlugin({ client: { auth: { set: async () => {} } } })
+    const auth = { type: "oauth", access: "a1", refresh: "r1", uid: "null-1" }
+    const bad = await hooks.auth.usage(async () => auth)
+    expect(bad.error).toBe("积分响应异常")
+    expect(bad.windows).toEqual([])
+    // the ledger never saw the null: the next good read is a fresh sight
+    balance = 990
+    const good = await hooks.auth.usage(async () => auth)
+    expect(good.error).toBeUndefined()
+    expect(good.balance).toBe("990 积分")
+    expect(good.windows.find((x) => x.name === "本轮消耗")).toBeUndefined()
   } finally {
     globalThis.fetch = realFetch
     rmSync(dir, { recursive: true, force: true })
