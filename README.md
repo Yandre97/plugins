@@ -31,6 +31,7 @@ subscription and makes its requests. The packages work in OpenCode and in
 | [qoder](packages/qoder) | Qoder subscription (qoder.com), with Qoder's device sign-in | `qoder` |
 | [qoder](packages/qoder) | Qoder CN subscription (qoder.cn), with Qoder CN's device sign-in | `qoder-cn` |
 | [raccoon](packages/raccoon) | SenseTime Raccoon (商汤小浣熊, xiaohuanxiong.com): account credits and daily check-in, with browser sign-in or Raccoon desktop's sign-in | `raccoon` |
+| [river](packages/river) | River (river.ai) pay-as-you-go inference, with your API key: per-account models, documented reasoning efforts and live prices | `river` |
 | [trae](packages/trae) | Trae CN (trae.cn) and Trae international (trae.ai), free tier included, with Trae's browser sign-in (experimental) | `trae-cn`, `trae-global` |
 | [workbuddy](packages/workbuddy) | WorkBuddy (China build, CodeBuddy plan) | `workbuddy` |
 | [workbuddy](packages/workbuddy) | WorkBuddy (international build) | `workbuddy-ai` |
@@ -133,10 +134,12 @@ it off puts the config back.
 | Package | Agent |
 |---|---|
 | [aider](packages/aider) | [Aider](https://aider.chat): `~/.aider.conf.yml`, through litellm's `openai/` prefix |
+| [bub](packages/bub) | [Bub](https://bub.build): `~/.bub/config.yml`, as the `magpie:` provider (needs Bub 0.5.1 or later) |
 | [kilo](packages/kilo) | [Kilo Code](https://kilo.ai): `~/.config/kilo/kilo.jsonc`, through an OpenAI-compatible provider |
-| [pig](packages/pig) | [PiG](https://github.com/MichaelKinsy/PiG): injects Magpie's endpoint and model catalog into `~/.pig/agent/models.json`; choose the model in PiG, startup settings stay unchanged |
 | [kimi-desktop](packages/kimi-desktop) | Ordinary [Kimi desktop](https://www.kimi.com/) Work, through its authenticated local runtime; not Kimi Code CLI |
+| [pig](packages/pig) | [PiG](https://github.com/MichaelKinsy/PiG): injects Magpie's endpoint and model catalog into `~/.pig/agent/models.json`; choose the model in PiG, startup settings stay unchanged |
 | [type4me](packages/type4me) | [Type4Me](https://github.com/joewongjc/type4me), macOS voice input: `~/Library/Application Support/Type4Me/magpie-agent.json`, for its LLM post-processing |
+| [opencodereview](packages/opencodereview) | [Open Code Review](https://github.com/alibaba/open-code-review) (`ocr`): `~/.opencodereview/config.json` as a custom Anthropic provider, so `ocr review` / `ocr scan` run on magpie's models |
 
 ```sh
 magpie plugin add @magpie-community/agent-<name>
@@ -215,10 +218,12 @@ Each package is a folder under `packages/<name>/`:
     `checkin(getAuth, provider)`. magpie calls it once a day for each
     signed-in account while the user has it on (Settings → Usage →
     Plugins), and shows what came of it on the account's Usage card. It
-    returns `{ outcome, credit?, streak?, message? }`, `outcome` being
+    returns `{ outcome, credit?, streak?, message?, until? }`, `outcome` being
     `claimed` (checked in now), `done` (already today), `ineligible`,
     `inactive` (no check-in event now), `captcha` or `failed`; a throw is
     `failed` with its message, and only `failed` is tried again that day.
+    `until` (RFC 3339) is when the vendor's own day turns, if not at
+    Beijing midnight: magpie asks again then (Qoder's opens at 10:00 UTC+8).
     Never solve a captcha: return `captcha` and the user checks in in the
     vendor's app. Needs magpie with the hook (after v0.1.1083);
     [the contract](https://github.com/yetone/magpie/blob/main/docs/subsystems/provider-plugins.md#a-plugins-daily-check-in).
